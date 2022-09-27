@@ -1,0 +1,168 @@
+version: '3'
+services:
+  traefik:
+    image: traefik:latest
+    restart: always
+    container_name: traefik
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      ###
+      - --certificatesresolvers.lets-encrypt.acme.tlschallenge=true
+      - --certificatesresolvers.lets-encrypt.acme.email=$TRAEFIK_EMAIL
+      - --certificatesresolvers.lets-encrypt.acme.storage=/letsencrypt/acme.json
+      ###
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/traefik_dynamic.yaml
+      - --providers.docker.network=web
+      - --api.insecure=true
+      - --api.dashboard=true
+      - --api.debug=true
+      - --log.level=INFO        
+    volumes:
+      - traefik-data:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./traefik/dynamic.yaml:/traefik_dynamic.yaml
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`$TRAEFIK_FQDN`)"
+      - "traefik.http.routers.api.service=api@internal"
+      - "traefik.http.routers.api.middlewares=api-auth"
+      - "traefik.http.middlewares.api-auth.basicauth.users=$TRAEFIK_DASHBOARD_BASIC_AUTH"
+  
+  influxdb:
+    image: influxdb:latest
+    container_name: influx
+    restart: always
+    ports:
+      - "8086:8086"
+    networks:
+      - web
+      - backend
+    env_file:
+      - 'influxdb.env'
+    environment:
+      INFLUXDB_REPORTING_DISABLED: 'true'
+      INFLUXDB_DB: 'db0'
+      INFLUXDB_META_DIR: '/var/lib/influxdb/meta'
+      INFLUXDB_DATA_DIR: '/var/lib/influxdb/data'
+      INFLUXDB_DATA_WAL_DIR: '/var/lib/influxdb/data'
+      INFLUXDB_DATA_MAX_SERIES_PER_DATABASE: '0'
+      INFLUXDB_DATA_MAX_VALUES_PER_TAG: '0'
+      INFLUXDB_DATA_SERIES_ID_SET_CACHE_SIZE: '100'
+      INFLUXDB_HTTP_BIND_ADDRESS: '8086'
+      INFLUXDB_HTTP_ENABLED: 'true'
+      INFLUXDB_HTTP_AUTH_ENABLED: 'true'
+    volumes:
+      - influxdb-storage:/var/lib/influxdb
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.influxdb.entrypoints=websecure"
+      - "traefik.http.routers.influxdb.rule=Host(`$INFLUX_FQDN`)"
+      - "traefik.http.routers.influxdb.service=influxdb@docker"
+      - "traefik.http.routers.influxdb.tls=true"
+      - "traefik.http.routers.influxdb.tls.certresolver=lets-encrypt"
+      - "traefik.http.services.influxdb.loadBalancer.server.port=8086"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: always
+    networks:
+      - web
+      - backend
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    depends_on:
+      - influxdb
+    environment:
+      GF_PATHS_DATA: '/var/lib/grafana'
+      GF_PATHS_PLUGINS: '/var/lib/grafana/plugins'
+      GF_PATHS_PROVISIONING: '/etc/grafana/provisioning'
+      GF_SERVER_HTTP_PORT: '3000'
+      GF_SERVER_MONITORING_DOMAIN: '$GRAFANA_FQDN'
+      GF_SERVER_ROOT_URL: 'https://$GRAFANA_FQDN'
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_RENDERING_SERVER_URL: "http://renderer:8081/render"
+      GF_RENDERING_CALLBACK_URL: "http://grafana:3000/"
+      GF_LOG_FILTERS: "rendering:debug"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.grafana_http.entrypoints=web"      
+      - "traefik.http.routers.grafana_http.rule=Host(`$GRAFANA_FQDN`)"
+      - "traefik.http.routers.grafana_http.middlewares=redirect-web-to-websecure@internal"
+      - "traefik.http.routers.grafana.rule=Host(`$GRAFANA_FQDN`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=lets-encrypt"
+      - "traefik.http.services.grafana.loadBalancer.server.port=3000"
+
+  renderer:
+    image: grafana/grafana-image-renderer:3.3.0
+    ports:
+      - 8081
+    environment:
+      ENABLE_METRICS: 'true'
+    networks:
+      - backend
+
+  telegraf:
+    image: telegraf:latest
+    container_name: telegraf
+    networks:
+      - backend
+    restart: always
+    volumes:
+      - ./telegraf/:/etc/telegraf/
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf
+      - telegraf-data:/tmp/telegraf/
+    env_file:
+      - 'influxdb.env'
+    command:
+      - "--config-directory=/etc/telegraf/telegraf.d"
+    depends_on:
+      - influxdb
+
+  node-red:
+      image: nodered/node-red
+      restart: always
+      container_name: node-red
+      networks:
+        - web
+      volumes:
+        - node-red-data:/data
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=web"
+        - "traefik.http.routers.red_http.entrypoints=web"      
+        - "traefik.http.routers.red_http.rule=Host(`$RED_FQDN`)"
+        - "traefik.http.routers.red_http.middlewares=redirect-web-to-websecure@internal"
+        - "traefik.http.routers.red.rule=Host(`$RED_FQDN`)"
+        - "traefik.http.routers.red.entrypoints=websecure"
+        - "traefik.http.routers.red.tls.certresolver=lets-encrypt"
+        - "traefik.http.services.red.loadBalancer.server.port=1880"
+  
+networks:
+  web:
+    external: true
+  backend:
+    external: false
+
+volumes:
+  telegraf-data:
+  influxdb-storage:
+  grafana-data:
+  traefik-data:
+  pihole-etc:
+  pihole-dnsmasq:
+  node-red-data:

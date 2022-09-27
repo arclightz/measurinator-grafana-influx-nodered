@@ -1,0 +1,16 @@
+http:
+  middlewares:
+    simpleAuth:
+      basicAuth:
+        users: {
+          "user:passwd" # generate with htpasswd -nb username password 
+          }
+
+  routers:
+    api:
+      rule: Host(`monitor.example.com`)
+      entrypoints: {"web"}
+      middlewares: {"simpleAuth"}
+      service: "api@internal"
+      tls:
+        certResolver: "lets-encrypt"
