@@ -74,7 +74,7 @@ services:
       - "traefik.http.services.influxdb.loadBalancer.server.port=8086"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana-enterprise:9.2.0-beta1
     container_name: grafana
     restart: always
     networks:
